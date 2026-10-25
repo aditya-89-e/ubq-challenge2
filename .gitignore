@@ -1,0 +1,7 @@
+# dataset and derived data are never committed
+data/
+workspace/
+.venv/
+__pycache__/
+*.pyc
+results/figures/*.png.tmp

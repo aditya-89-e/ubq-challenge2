@@ -1,0 +1,52 @@
+# Pipeline configuration. Every derived window records a hash of the
+# sections that produced it (see windows/index.csv: config_hash).
+
+paths:
+  raw_root: data/raw                     # read-only source package
+  exp2_dir: data/raw/Experiment-2/realdata/input_data/30ms/csidata
+  exp3_dir: data/raw/Experiment-3/Data
+  work: workspace
+  intermediate: workspace/intermediate_csv
+  windows: workspace/windows
+  artifacts: workspace/artifacts
+  results: results
+
+splits:
+  room_b_val_per_class: 25
+  seed: 42
+
+qc:
+  # frames with more than this fraction of their energy in a single 20 MHz
+  # sub-band are legacy 20 MHz frames, not valid 80 MHz observations.
+  max_subband_frac: 0.9
+
+window:
+  length: 150
+  dev_stride: 50          # sliding-window stride for development captures
+  short_policy: resample  # captures with < length valid rows: resample | edge
+  min_valid: 20           # captures with fewer valid rows are dropped
+
+normalization:
+  per_packet_gain: true   # divide each observation by its RMS over data bins
+  log: false
+  scope: room             # room | global : per-subcarrier standardisation stats
+  null_bin_rel_level: 0.05  # bins below this fraction of the median dev amplitude
+                            # (guard band / DC) are zeroed after normalisation
+
+ssl:
+  epochs: 60
+  batch_size: 128
+  lr: 0.001
+  weight_decay: 0.0001
+  temperature: 0.2
+  emb_dim: 128
+  width: 128
+  seed: 0
+
+task1:
+  window_lengths: [1, 2, 5, 10, 25, 50, 100, 150]
+
+task3:
+  alignment: coral       # coral (full per-room whitening) | diag (per-room standardisation)
+  K: [1, 5, 10, 20]
+  support_seeds: [0, 1, 2, 3, 4]

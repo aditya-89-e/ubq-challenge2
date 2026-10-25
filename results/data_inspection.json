@@ -1,0 +1,94 @@
+{
+  "room_A": {
+    "n_files": 1084,
+    "per_folder": {
+      "fall": 177,
+      "sit": 178,
+      "sitdown": 155,
+      "stand": 115,
+      "standup": 155,
+      "validation/fall": 25,
+      "validation/sit": 25,
+      "validation/sitdown": 25,
+      "validation/stand": 25,
+      "validation/standup": 25,
+      "validation/walk": 25,
+      "walk": 154
+    },
+    "non_pcap_files": [],
+    "udp_payload_lengths": {
+      "1042": 234019,
+      "726": 2
+    },
+    "chip": {
+      "0x6a": 234019
+    },
+    "chanspec": {
+      "0xe02a": 234019
+    },
+    "core_stream": {
+      "core0/ss0": 234019
+    },
+    "packets_per_capture": {
+      "min": 112.0,
+      "median": 221.0,
+      "max": 251.0
+    },
+    "sequenced_frames_per_capture": {
+      "min": 1.0,
+      "median": 111.0,
+      "max": 129.0
+    },
+    "duration_s": {
+      "min": 2.8400590419769287,
+      "median": 3.9242119789123535,
+      "max": 3.9779140949249268
+    },
+    "sequenced_rate_hz": {
+      "min": 0.25380730257307704,
+      "median": 28.291409309503592,
+      "max": 33.123169361982015
+    },
+    "seq_step_top": {
+      "16": 112714,
+      "0": 684,
+      "32": 509,
+      "48": 150,
+      "64": 72,
+      "80": 32
+    },
+    "legacy_content_rule_vs_seq0xffff_agreement": {
+      "min": 0.59375,
+      "median": 0.7633928571428571,
+      "max": 1.0
+    }
+  },
+  "room_B": {
+    "n_files": 1201,
+    "filename_prefixes": {
+      "Empty": 1,
+      "Empty_Amp": 266,
+      "Lying": 1,
+      "Lying_Amp": 350,
+      "Sitting": 1,
+      "Sitting_Amp": 152,
+      "Standing": 1,
+      "Standing_Amp": 220,
+      "Walking": 209
+    },
+    "rows_per_capture": {
+      "500": 1201
+    },
+    "header_first_last_ncols": {
+      "0..255 (256)": 5,
+      "Subcarrier_1..Subcarrier_256 (256)": 1196
+    },
+    "dtypes": {
+      "int64": 1201
+    },
+    "nonfinite_rows": 0,
+    "other_files": [
+      "model_plot_1.png"
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+# Python 3.11. CPU-only PyTorch is sufficient (the full pipeline runs on a laptop CPU).
+#   uv venv --python 3.11 .venv
+#   uv pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
+# or: python -m pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+dpkt==1.9.8
+numpy==2.4.6
+pandas==3.1.0
+scipy==1.17.1
+scikit-learn==1.9.1
+matplotlib==3.11.2
+pyyaml==6.0.3
+torch==2.14.1
+umap-learn==0.5.12
+requests==2.34.2

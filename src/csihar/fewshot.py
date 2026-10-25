@@ -1,0 +1,226 @@
+"""Task 3: cross-room few-label adaptation on frozen representations.
+
+Pipeline for one episode (target room T, source room S, K, seed):
+
+  1. Support selection: for every T-exclusive activity, draw K distinct
+     T-development captures (sorted capture ids, numpy RNG with `seed`).
+     All windows of a chosen capture are used, but K counts captures.
+  2. Environment-aware alignment: embeddings are whitened with the
+     statistics of their room's *unlabelled* development embeddings --
+     per-dimension mean/std (a feature-level analogue of AdaBN) or full
+     covariance (CORAL-style). At inference the room comes from the
+     router (Task 1 classifier), the oracle room, or -- without routing --
+     one pooled set of statistics.
+  3. Classifier on aligned embeddings, trained on all labelled S-development
+     windows plus the T support windows:
+       proto  - cosine nearest class prototype (per-capture means averaged,
+                so one long capture does not dominate a class)
+       logreg - class-balanced multinomial logistic regression
+  4. Label-space routing: a window routed to room R may only receive R's
+     activities. Without routing, the union of all trained labels is used.
+  5. Optional transductive refinement on unlabelled T-development windows
+     (never validation): soft prototype re-estimation that moves the
+     source-learned shared-class prototypes toward the target room.
+"""
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+
+from .config import EXCLUSIVE, ROOM_ACTIVITIES, ROOMS, SHARED
+
+
+# ---------------------------------------------------------------- alignment
+def _whitener(e, mode, shrink=0.1):
+    mu = e.mean(0)
+    if mode == "diag":
+        return mu, np.diag(1.0 / (e.std(0) + 1e-6))
+    # CORAL-style full whitening with shrinkage towards the diagonal
+    c = np.cov(e, rowvar=False)
+    c = (1 - shrink) * c + shrink * np.diag(np.diag(c))
+    w, v = np.linalg.eigh(c)
+    return mu, v @ np.diag(1.0 / np.sqrt(np.maximum(w, 1e-8))) @ v.T
+
+
+def fit_alignment(E_dev, rooms_dev, mode="diag"):
+    """Per-room (and pooled) whitening statistics from unlabelled dev embeddings.
+
+    mode: 'diag' (per-dimension standardisation) or 'coral' (full covariance).
+    """
+    rooms_dev = np.asarray(rooms_dev)
+    stats = {"global": _whitener(E_dev, mode)}
+    for r in ROOMS:
+        stats[r] = _whitener(E_dev[rooms_dev == r], mode)
+    return stats
+
+
+def apply_alignment(E, rooms, stats):
+    """rooms: per-window room for room-wise stats, or None for pooled stats."""
+    if rooms is None:
+        mu, W = stats["global"]
+        return ((E - mu) @ W).astype(np.float32)
+    out = np.empty_like(E)
+    rooms = np.asarray(rooms)
+    for r in ROOMS:
+        m = rooms == r
+        mu, W = stats[r]
+        out[m] = (E[m] - mu) @ W
+    return out
+
+
+def _l2(x):
+    return x / np.maximum(np.linalg.norm(x, axis=-1, keepdims=True), 1e-9)
+
+
+# --------------------------------------------------------------- classifiers
+class PrototypeClassifier:
+    def __init__(self, temperature=0.1):
+        self.t = temperature
+
+    def fit(self, E, y, groups):
+        self.classes_ = np.array(sorted(set(y)))
+        En = _l2(E)
+        protos = []
+        for c in self.classes_:
+            m = y == c
+            caps = np.unique(groups[m])
+            per_cap = np.stack([En[m & (groups == g)].mean(0) for g in caps])
+            protos.append(per_cap.mean(0))
+        self.protos_ = _l2(np.stack(protos))
+        return self
+
+    def decision(self, E):
+        return _l2(E) @ self.protos_.T / self.t
+
+
+class LogRegClassifier:
+    def __init__(self, C=0.5):
+        self.m = LogisticRegression(C=C, max_iter=3000, class_weight="balanced")
+
+    def fit(self, E, y, groups):
+        self.m.fit(E, y)
+        self.classes_ = self.m.classes_
+        return self
+
+    def decision(self, E):
+        return self.m.decision_function(E)
+
+
+def make_classifier(name):
+    return PrototypeClassifier() if name == "proto" else LogRegClassifier()
+
+
+def predict_restricted(clf, E, allowed_per_row):
+    """Argmax over allowed classes per row; returns labels and softmax confidence."""
+    s = clf.decision(E)
+    labels = np.empty(len(E), dtype=object)
+    conf = np.empty(len(E))
+    for i in range(len(E)):
+        allowed = allowed_per_row[i]
+        mask = np.isin(clf.classes_, allowed)
+        si = np.where(mask, s[i], -np.inf)
+        p = np.exp(si - si.max())
+        p /= p.sum()
+        j = int(np.argmax(p))
+        labels[i] = clf.classes_[j]
+        conf[i] = p[j]
+    return labels, conf
+
+
+# ------------------------------------------------------------- refinement
+def sinkhorn(scores, n_iter=50):
+    """Balanced soft assignment: rows sum to 1, columns share mass equally."""
+    P = np.exp(scores - scores.max())
+    P /= P.sum()
+    r = np.full(P.shape[0], 1.0 / P.shape[0])
+    c = np.full(P.shape[1], 1.0 / P.shape[1])
+    for _ in range(n_iter):
+        P *= (r / np.maximum(P.sum(1), 1e-30))[:, None]
+        P *= (c / np.maximum(P.sum(0), 1e-30))[None, :]
+    return P / P.sum(1, keepdims=True)
+
+
+def refine_prototypes(clf, E_unlab, allowed, E_sup=None, y_sup=None, iters=10, eps=0.05,
+                      support_weight=1.0):
+    """Transductive prototype refinement on unlabelled target-development windows.
+
+    Soft k-means initialised from the current prototypes (source-learned shared
+    classes + support-learned exclusive classes) with a Sinkhorn balanced-
+    assignment step, so that in-domain support prototypes cannot absorb all
+    target windows. Each support class keeps an anchor: its support mean is
+    added with weight `support_weight` x (that class's assigned mass). Uses no
+    validation data and no target labels beyond the K support captures.
+    """
+    if not isinstance(clf, PrototypeClassifier):
+        return clf
+    idx = np.where(np.isin(clf.classes_, allowed))[0]
+    names = list(clf.classes_[idx])
+    En = _l2(E_unlab)
+    protos = clf.protos_[idx].copy()
+    anchors = {}
+    if E_sup is not None:
+        Es = _l2(E_sup)
+        for j, c in enumerate(names):
+            m = np.asarray(y_sup) == c
+            if m.any():
+                anchors[j] = _l2(Es[m].mean(0))
+    for _ in range(iters):
+        Q = sinkhorn(En @ protos.T / eps)
+        num = Q.T @ En
+        mass = Q.sum(0)
+        for j, a in anchors.items():
+            num[j] += support_weight * mass[j] * a
+        protos = _l2(num)
+    clf.protos_ = clf.protos_.copy()
+    clf.protos_[idx] = protos
+    return clf
+
+
+# ------------------------------------------------------------------ episodes
+def select_support(meta_dev, target, K, seed):
+    """Return capture ids of K support captures per target-exclusive class."""
+    rng = np.random.default_rng(seed)
+    chosen = []
+    for c in EXCLUSIVE[target]:
+        caps = sorted(meta_dev[(meta_dev.room == target) & (meta_dev.label == c)].capture_id.unique())
+        chosen += list(rng.choice(caps, size=min(K, len(caps)), replace=False))
+    return chosen
+
+
+def run_episode(E_dev, meta_dev, E_val, meta_val, target, K, seed, routed_rooms,
+                align_stats, classifier="proto", routing="predicted", refine=False):
+    """Fit on source labels + K target support captures, predict target validation.
+
+    routing: 'predicted' | 'oracle' | 'none'
+    routed_rooms: router output for the validation windows (used if 'predicted').
+    Returns dict with predictions and the support capture ids.
+    """
+    source = [r for r in ROOMS if r != target][0]
+    support = select_support(meta_dev, target, K, seed)
+    src = (meta_dev.room == source).values
+    sup = meta_dev.capture_id.isin(support).values
+    train = src | sup
+
+    rooms_dev = meta_dev.room.values
+    vm = (meta_val.room == target).values
+    if routing == "none":
+        A_dev = apply_alignment(E_dev, None, align_stats)
+        A_val = apply_alignment(E_val[vm], None, align_stats)
+        val_rooms = np.array([None] * vm.sum())
+    else:
+        val_rooms = meta_val.room.values[vm] if routing == "oracle" else np.asarray(routed_rooms)[vm]
+        A_dev = apply_alignment(E_dev, rooms_dev, align_stats)
+        A_val = apply_alignment(E_val[vm], val_rooms, align_stats)
+
+    clf = make_classifier(classifier).fit(
+        A_dev[train], meta_dev.label.values[train], meta_dev.capture_id.values[train])
+
+    if refine:
+        # unlabelled windows recorded during the target-room setup visit
+        unl = (meta_dev.room == target).values & ~sup
+        allowed = clf.classes_ if routing == "none" else ROOM_ACTIVITIES[target]
+        clf = refine_prototypes(clf, A_dev[unl], allowed, A_dev[sup], meta_dev.label.values[sup])
+
+    all_labels = list(clf.classes_)
+    allowed = [all_labels if r is None else ROOM_ACTIVITIES[r] for r in val_rooms]
+    pred, conf = predict_restricted(clf, A_val, allowed)
+    return dict(y_true=meta_val.label.values[vm], y_pred=pred.astype(str), confidence=conf,
+                window_id=meta_val.window_id.values[vm], routed_room=val_rooms, support=support)
